@@ -127,8 +127,7 @@ bash scripts/run_demo.sh def-fsm-qwen3-4b_gguf_f16/<model>.gguf
 ```
 
 A training output directory works the same way; point the converter at its
-`best_loss_..._step_...` subdirectory instead. `convert_to_gguf.sh` also accepts `bf16` or `q8_0`
-as a second argument.
+`best_loss_..._step_...` subdirectory instead.
 
 `scripts/run_demo.sh` passes its extra arguments to [demo/app_local.py](demo/app_local.py), so
 `--asr-worker simul` and `--devices cuda:0 cuda:1 cuda:2` both work.
@@ -172,15 +171,12 @@ state transition tokens on the validation and test splits about turn-taking prof
 ## Citation
 ```
 @inproceedings{li-chu-2026-decoupling,
-    title     = {Decoupling Turn-Taking from Semantics: A Decoupled Data Approach for Finite-State-Machine-Based Full-Duplex Dialogue},
+    title     = {Decoupling Turn-Taking from Semantics: A Decoupled Data Approach for
+                 Finite-State-Machine-Based Full-Duplex Dialogue},
     author    = {Li, Yihang and Chu, Chenhui},
     booktitle = {Proceedings of the 2026 Conference on Empirical Methods in Natural
                  Language Processing},
     year      = {2026},
-    eprint    = {2609.03321},
-    archivePrefix = {arXiv},
-    primaryClass  = {cs.CL},
-    url       = {https://arxiv.org/abs/2609.03321},
 }
 ```
 
