@@ -1,0 +1,18 @@
+# The default setting with the word-level SimulStreaming perception module in
+# place of the IPU-level Faster-Whisper one.
+#
+# The tapes come from the simul_setting transformation, whose token volume
+# differs slightly from the faster_setting one, so the mixture ratios are
+# re-derived to keep the same token-matched budget.
+training:
+  output_dir: "${CHECKPOINT_ROOT}/def_fsm_ours_simul"
+  per_device_train_batch_size: 8
+
+dataset:
+  assistant:
+    dataset_paths:
+      switchboard: "${DATA_ROOT}/switchboard_tape_dataset/simul_setting_original_assistant"
+      fisher: "${DATA_ROOT}/fisher_tape_dataset/simul_setting_original_assistant"
+    dataset_ratios:
+      switchboard: 0.092
+      fisher: 0.0288

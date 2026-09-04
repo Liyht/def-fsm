@@ -1,0 +1,21 @@
+# The NFSM baseline: LLM-generated synthetic tapes only, plain cross-entropy.
+#
+# The synthetic corpus is produced by data_transformation/fsm_data_generation.py
+# followed by text_dataset_to_tape.py --task FSM_synthetic_train.
+training:
+  output_dir: "${CHECKPOINT_ROOT}/def_fsm_nfsm_synthetic"
+  loss_function: "loss_modification"
+  normalize_by_count: false
+
+dataset:
+  assistant:
+    dataset_ratios:
+      switchboard: 0.0
+      fisher: 0.0
+      shareGPT: 0.0
+      synthetic: 1.0
+    dataset_loss_weights:
+      switchboard: [0.5, 0.5]
+      fisher: [0.5, 0.5]
+      shareGPT: [0.5, 0.5]
+      synthetic: [0.5, 0.5]

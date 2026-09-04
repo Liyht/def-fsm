@@ -1,0 +1,63 @@
+[project]
+name = "def-fsm"
+version = "1.0.0"
+description = "DEF-FSM: decoupled, event-guided data for finite-state-machine-based full-duplex dialogue"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Yihang Li", email = "liyh@nlp.ist.i.kyoto-u.ac.jp" },
+    { name = "Chenhui Chu", email = "chu@i.kyoto-u.ac.jp" },
+]
+keywords = ["full-duplex dialogue", "turn-taking", "spoken dialogue", "finite state machine"]
+
+# Core: data transformation and training.
+dependencies = [
+    "accelerate==1.11.0",
+    "beautifulsoup4==4.14.3",
+    "datasets==4.4.1",
+    "deepmultilingualpunctuation==1.0.1",
+    "deepspeed==0.18.1",
+    "python-dotenv==1.2.1",
+    "fire==0.7.1",
+    "icecream==2.1.8",
+    "jiwer==4.0.0",
+    "langid==1.1.6",
+    "matplotlib==3.10.7",
+    "numpy==2.2.6",
+    "peft==0.18.1",
+    "pysbd==0.3.4",
+    "pyyaml==6.0.3",
+    "seaborn==0.13.2",
+    "torch==2.8.0",
+    "tqdm==4.67.1",
+    "transformers==4.55.4",
+    "wandb==0.23.1",
+]
+
+[project.optional-dependencies]
+# Perception module, and the ASR stage of the data pipeline.
+asr = [
+    "faster-whisper==1.2.1",
+    "librosa==0.11.0",
+    "silero-vad==6.2.0",
+    "soundfile==0.13.1",
+    "torchaudio==2.8.0",
+]
+# Real-time inference: cognitive module (llama.cpp) and motor module (Kokoro).
+inference = [
+    "llama-cpp-python==0.3.16",
+    "kokoro==0.9.4",
+    "scipy==1.16.3",
+    "sounddevice==0.5.3",
+]
+# vLLM-backed stages: the stylistic rewriting and synthetic generation of the data
+# pipeline, and the fsm_bench / VoiceBench evaluations.
+rewrite = ["openai==2.6.1", "vllm==0.11.0", "loguru==0.7.3", "pydantic==2.12.3"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["def_fsm"]

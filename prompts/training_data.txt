@@ -1,0 +1,52 @@
+#### User Information
+- Time-Constrained: The user is often in a hurry and tends to interrupt the AI voice assistant before it finishes speaking. The types of interruptions include:
+1. Denial and Discontent: Expressing denial or dissatisfaction with the response;
+2. Further Inquiry: Asking follow-up questions or new questions on the same topic after receiving the desired information;
+3. Affirmative Acknowledgment: Expressing satisfaction with the response using simple affirmative words;
+4. Third-Party Noise: Background noise or unrelated speech being recorded, causing interruptions. The AI voice assistant should continue its response unaffected by this type of interruption.
+- Language Expression: The user's language should be as colloquial and human-like as possible.
+
+#### AI Assistant Information
+- Response Requirements: The AI voice assistant should provide detailed, comprehensive, and polite responses with a light and natural tone, incorporating the context from previous interactions.
+- Hardware Malfunction: Occasionally, the user's questions may be partially cut off due to hardware issues.
+The AI assistant should respond based on its understanding or politely ask for more information if necessary.
+- Prohibited Content: The AI assistant must not provide illegal or harmful information and should refuse to answer politically sensitive questions.
+- Timeliness Issues: The AI assistant is offline and cannot answer time-sensitive questions like "tomorrow's weather" or "today's news."
+- Error Correction: If the user's statements contain obvious errors, the AI assistant should politely correct them and provide useful information.
+
+#### Conversation Task
+- Number of Rounds: Generate {num_rounds} rounds of conversation in English.
+- In the following rounds, the assistant's output is interrupted:
+1. Denial and Discontent: In round {denial_round}, the user must express denial or dissatisfaction with the response in 15 words or less. The AI assistant should stop its response and address the user's concerns in the next round.
+2. Further Inquiry: In round {inquiry_round}, the user asks a follow-up question or a new question on the same topic in 30 words or less. The AI assistant should respond to the new question in the next round.
+3. Topic Change: In round {topic_change_round}, the user changes the topic after receiving the desired information in 30 words or less. The AI assistant should respond to the new topic in the next round.
+4. Third-Party Noise: In round {noise_round}, unrelated content is recorded due to background noise, in 15 words or less. The AI assistant should continue its response unaffected but transition naturally, possibly using filler words.
+5. Affirmative Acknowledgment: In round {acknowledgment_round}, the user expresses satisfaction with the response in 3 words or less. The AI assistant should continue its response unaffected but transition naturally, possibly using filler words.
+- In the following rounds, the user's output is interrupted:
+1. Lack of Information: In round {lack_round}, the user's input is severely truncated. The AI assistant cannot answer the question due to insufficient information and should ask for more details in the next round.
+2. Complete Information: In round {complete_round}, the user's question is incomplete but contains enough information for the AI assistant to respond.
+3. Error Present: In round {error_round}, the user's statement contains an obvious factual error. The AI assistant should politely correct the error and provide useful information.
+- Casual Conversation: The remaining rounds should consist of casual conversation without strict requirements, ensuring smooth transitions between interactions.
+- First Question: The user's first question should be related to the following topic: {first_question_topic}
+
+#### Notes
+- Filler Words: The AI assistant may use filler words to create a more relaxed and friendly atmosphere.
+- Third-Party Interruption: If the AI assistant's response is interrupted by a third party, it should continue the unfinished response in the next round.
+- Word Count: If not interrupted, the AI assistant's responses should be around {response_word_count} words. When interrupted, responses should be around {interrupted_response_word_count} words, ensuring the interruption does not occur mid-sentence.
+- Topic Transition: Topic transitions must be initiated by the user; the AI assistant should not introduce new topics.
+- Interruption Format: When interrupted, both user and assistant outputs should end with the marker "<NOT_FINISHED>". All truncations should occur after a complete word, e.g., "My name is Mike." should be truncated as "My name <NOT_FINISHED>", not "My na<NOT_FINISHED>".
+- Analysis: Before outputting the dialogue content of the user or AI assistant, first analyze whether the content will be interrupted, and what are the characteristics of the interruption in this round.
+
+#### Output Format
+User: <first_question>
+--
+Round: <round_number_0>
+Assistant Analysis: <analysis_for_assistant_interrupt_or_not>
+Assistant Content: <assistant_content>
+User Analysis: <analysis_for_user_interrupt_or_not>
+User Content: <user_content>
+--
+Round: <round_number_1>
+...
+#### Output
+Round:

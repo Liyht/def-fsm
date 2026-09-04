@@ -1,0 +1,47 @@
+# Machine-specific paths. Copy this file to configs/paths.yaml and edit it.
+#
+# Every config, script and module in this repository refers to these through
+# ${NAME} placeholders, so paths.yaml is the only place that holds absolute
+# paths. Any entry can also be supplied as an environment variable, which takes
+# priority over the value here. PROJECT_ROOT is always available and needs no
+# entry.
+
+# ---------------------------------------------------------------- corpora ----
+# Raw Human-Human spoken dialogue corpora (LDC licences required, see README).
+SWITCHBOARD_ROOT: /path/to/switchboard   # expects audio_wav/ and transcripts/
+FISHER_ROOT: /path/to/fisher             # expects fe_03_audio/ and fe_03_ori/
+
+# Local snapshot of the RyokoAI/ShareGPT52K dataset (Human-Agent text side).
+SHAREGPT_DIR: /path/to/huggingface/hub/datasets--RyokoAI--ShareGPT52K/snapshots/<hash>
+
+# ------------------------------------------------------------------ models ----
+# Directory holding locally downloaded foundation models. The configs default to a
+# plain Hugging Face id (Qwen/Qwen3-4B), so this is only needed for offline use or
+# to pin a specific snapshot, referenced as ${MODEL_ROOT}/<dir>.
+MODEL_ROOT: /path/to/huggingface/models
+
+# Whisper large-v3-turbo checkpoint used by the SimulStreaming perception module.
+WHISPER_MODEL_PATH: /path/to/whisper/large-v3-turbo.pt
+
+# Checkout of the patched SimulStreaming fork (see third_party/patches/).
+# Only needed for the word-level perception module.
+SIMULSTREAMING_PATH: /path/to/SimulStreaming
+
+# llama.cpp checkout, used by scripts/convert_to_gguf.sh for inference.
+LLAMA_CPP_PATH: /path/to/llama.cpp
+
+# -------------------------------------------------------------- evaluation ----
+# Checkout of Full-Duplex-Bench and the audio it evaluates on, used by
+# evaluation/full_duplex_bench/. Only needed to run that benchmark.
+FDB_PATH: /path/to/Full-Duplex-Bench
+FDB_DATA: /path/to/Full-Duplex-Bench-Data   # expects v1.0/ and v1.5/
+
+# Checkout of VoiceBench, used by evaluation/voicebench/.
+VOICEBENCH_PATH: /path/to/VoiceBench
+
+# ------------------------------------------------------------------- output ----
+# Derived tape datasets written by the data transformation pipeline.
+DATA_ROOT: ${PROJECT_ROOT}/data
+
+# Training output directories (checkpoints, logs, saved configs).
+CHECKPOINT_ROOT: ${PROJECT_ROOT}/checkpoints

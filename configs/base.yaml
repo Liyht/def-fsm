@@ -1,0 +1,114 @@
+# Main configuration: DEF-FSM trained on the token-matched mixture with the
+# Source-Aware Calibrated (SAC) loss and the Faster-Whisper (IPU-level)
+# perception module. This is the default setting.
+#
+# Paths use ${NAME} placeholders resolved from configs/paths.yaml; see
+# configs/paths.example.yaml. The variants in configs/experiments/ express the
+# other reported settings as overrides on this file.
+
+project_name: "def_fsm"
+
+# A Hugging Face id (resolved through HF_HOME) or a local directory. For an offline
+# checkout, point this at ${MODEL_ROOT}/<your-snapshot-dir> instead.
+model_dir: "Qwen/Qwen3-4B"
+seed: 42
+
+# Tape vocabulary added to the tokenizer: the five state transition tokens, the
+# silence token and the role prefixes.
+new_tokens: ["[S.SPEAK]", "[S.LISTEN.INTERRUPT]", "[S.LISTEN.NATURAL]", "[C.SPEAK]", "[C.LISTEN]", "<interlocutor>", "<user>", "<assistant>", "<SIL>"]
+token_init_method: "subtoken_mean" # Options: "random", "global_mean", "subtoken_mean"
+
+dataset:
+  # The user-side model (used to drive the interlocutor in self-play). It is not
+  # trained by default, hence all ratios are 0.
+  user:
+    system_prompt_path: "${PROJECT_ROOT}/prompts/fsm_user.txt"
+    dataset_paths:
+      switchboard: "${DATA_ROOT}/switchboard_tape_dataset/faster_setting_original_user"
+      fisher: "${DATA_ROOT}/fisher_tape_dataset/faster_setting_original_user"
+      shareGPT: "${DATA_ROOT}/shareGPT_tape_dataset/user"
+    # Dataset balancing. null or omitted means the original volume (ratio 1.0);
+    # otherwise the split is resampled (up or down) to len(dataset) * ratio.
+    dataset_ratios:
+      switchboard: 0.0
+      fisher: 0.0
+      shareGPT: 0.0
+    dataset_loss_weights: # [response_weight, transition_weight]
+      switchboard: [0.5, 0.5]
+      fisher: [0.5, 0.5]
+      shareGPT: [0.5, 0.5]
+
+  # The assistant-side model. This is the model that gets evaluated.
+  assistant:
+    system_prompt_path: "${PROJECT_ROOT}/prompts/fsm_assistant.txt"
+    dataset_paths:
+      switchboard: "${DATA_ROOT}/switchboard_tape_dataset/faster_setting_original_assistant"
+      fisher: "${DATA_ROOT}/fisher_tape_dataset/faster_setting_original_assistant"
+      shareGPT: "${DATA_ROOT}/shareGPT_tape_dataset/assistant"
+      synthetic: "${DATA_ROOT}/FSM_tape_dataset"
+    # Token-matched mixture: HH:HA = 1:1 with Fisher:Switchboard = 4:1 inside HH,
+    # scaled so the total token volume matches the NFSM synthetic baseline.
+    dataset_ratios:
+      switchboard: 0.0867
+      fisher: 0.0247
+      shareGPT: 0.2266
+      synthetic: 0.0
+    # Source-aware weighting. With alpha = 0.6, the Human-Human sources put
+    # weight alpha on transition tokens and 1 - alpha on response tokens, and
+    # the Human-Agent source does the reverse.
+    dataset_loss_weights: # [response_weight, transition_weight]
+      switchboard: [0.4, 0.6]
+      fisher: [0.4, 0.6]
+      shareGPT: [0.6, 0.4]
+      synthetic: [0.5, 0.5]
+
+training:
+  output_dir: "${CHECKPOINT_ROOT}/def_fsm_ours_faster"
+
+  finetune_mode: "full" # ["full", "lora"]
+
+  # LoRA hyperparameters (unused when finetune_mode is "full")
+  lora_r: 128
+  lora_alpha: 64
+  lora_dropout: 0.05
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+  # Dataloader
+  num_workers: 4
+
+  # Total batch size = per_device_train_batch_size * #devices * gradient_accumulation_steps.
+  # The reference runs use 4 GPUs, giving a total batch size of 256.
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 16
+  learning_rate: 1.0e-5
+  max_train_steps: 300 # takes precedence over max_epochs when set
+  max_epochs: null
+  max_length: 1024
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+  max_grad_norm: 1.0
+  offload_optimizer_device: "none" # Options: "cpu", "none"
+
+  # "logit_adjustment" is the SAC loss. "loss_modification" with uniform
+  # dataset_loss_weights and normalize_by_count false is the plain
+  # cross-entropy baseline reported as "w/o SAC loss".
+  loss_function: "logit_adjustment" # "loss_modification" | "logit_adjustment" | "fuzzy_logit_adjustment" | "all_logit_adjustment"
+
+  # Loss modification settings.
+  # true:  transition tokens keep a high weight even though they are rare
+  #        (the mean is taken first, then the weight is applied).
+  # false: the loss is dominated by raw token counts.
+  normalize_by_count: true
+
+  # Logit adjustment settings.
+  logit_adjustment_tau: 1.0  # the temperature tau
+  prob_denominator: "transition" # Options: "all", "transition". "transition" computes
+                                 # the prior over the restricted transition vocabulary.
+
+  # Fuzzy logit adjustment settings
+  response_exact_prob: 0.0
+
+  # Logging & saving
+  logging_steps: 5
+  eval_steps: 15
+  early_stopping_patience: 6

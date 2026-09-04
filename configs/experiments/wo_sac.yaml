@@ -1,0 +1,17 @@
+# Ablation: standard cross-entropy instead of the SAC loss.
+#
+# Two things are switched off together: the logit adjustment over the state
+# transition vocabulary (loss_function) and the source-aware weighting
+# (uniform dataset_loss_weights, i.e. alpha = 0.5).
+training:
+  output_dir: "${CHECKPOINT_ROOT}/def_fsm_wo_sac"
+  loss_function: "loss_modification"
+  normalize_by_count: false
+
+dataset:
+  assistant:
+    dataset_loss_weights:
+      switchboard: [0.5, 0.5]
+      fisher: [0.5, 0.5]
+      shareGPT: [0.5, 0.5]
+      synthetic: [0.5, 0.5]

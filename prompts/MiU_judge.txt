@@ -1,0 +1,25 @@
+I will provide a transcript of a conversation between a user and an AI voice assistant.
+
+# Dialogue
+{dialogue_history}
+
+# Background Information
+1) The dialogue system is full-duplex, aiming for extremely low response latency, hence the user’s voice data is streamed to the assistant at a high frequency;
+2) The assistant must determine whether the user’s information is complete based on the context of the conversation, and respond when the information is sufficient;
+3) The assistant may interrupt the user under two circumstances:
+a. When the information received is enough to formulate a response;
+b. When there is a clear error in the user’s speech that needs immediate correction.
+
+# Task
+1) Analyze the timing of the assistant’s interruption in the last round of the dialogue to determine if it was appropriate;
+2) If the timing of the interruption was appropriate, further evaluate the relevance and coherence of the interjection with the previous conversation;
+3) First, provide an analysis of the appropriateness of the interruption timing and the content of the interjection, thenlist two scores:
+a. The first score evaluates the timing of the interruption, where 0 represents inappropriate, and 1 represents appropriate;
+b. The second score evaluates the content of the interjection, where 0 represents inappropriate, and 1 represents appropriate.
+4) Note, the user’s information being incomplete is not due to the user stopping their speech, but because the assistant interrupted, so you need to carefully judge the appropriateness of the assistant’s interruption.
+
+# Output Format
+You must output your evaluation as a JSON object. The JSON object must contain exactly the following keys:
+- "analysis_for_assistant_interruption": (String) Your detailed analysis of the appropriateness of the interruption timing and the content.
+- "score_for_interruption": (Integer) 0 for inappropriate timing, 1 for appropriate timing.
+- "score_for_content": (Integer) 0 for inappropriate content, 1 for appropriate content.

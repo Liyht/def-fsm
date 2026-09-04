@@ -1,0 +1,22 @@
+I will provide a transcript of a conversation between a user and an AI voice assistant. In the last exchange, the user interrupts the assistant before it finishes speaking.
+
+# Dialogue
+{dialogue_history}
+
+# Known Information
+1) The dialogue system is full-duplex, aiming for smooth interaction, allowing the user to interrupt the assistant at any time during its response;
+2) The assistant must discern the user’s intent from the context of the conversation and adjust its dialogue strategy accordingly:
+a. If the user expresses denial or dissatisfaction with the response, the AI assistant should stop its current response and address the user’s concerns;
+b. If the user asks further questions or shifts the topic, the AI assistant needs to respond to the new inquiry;
+c. If there is sudden, unrelated third-party noise during the user’s speech, the AI assistant should continue delivering its previous response, ensuring a natural transition;
+d. If the user uses backchannels or simple continuers indicating they are listening (e.g., "uh-huh", "nice", "yeah", "hmm"), the AI assistant should continue delivering its previous response, ensuring a natural transition.
+e. If the user expresses a polite termination, full understanding, or satisfaction indicating they have enough information (e.g., "Got it, thanks", "Okay, I understand now", "That's all I need"), the AI assistant should elegantly stop its current response and offer a polite closing or wait for the next query.
+
+# Task
+1) Infer the reason for the user’s interruption in the last round of dialogue and determine how the assistant should respond, analyzing the appropriateness of the assistant’s response;
+2) First, provide an analysis of the user’s interruption intent and the appropriateness of the assistant’s response, then give a score for the assistant’s last response in the final line: 0 for inappropriate, 1 for appropriate.
+
+# Output Format
+You must output your evaluation as a JSON object. The JSON object must contain exactly the following keys:
+- "analysis_for_user_interruption": (String) Your detailed analysis of the user's interruption intent and the appropriateness of the assistant's response.
+- "score_for_assistant_last_content": (Integer) 0 for inappropriate response, 1 for appropriate response.

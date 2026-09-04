@@ -1,0 +1,22 @@
+# Ablation: Human-Human tapes only, no Human-Agent data. Uses plain
+# cross-entropy, like the other data-composition ablations.
+#
+# The Switchboard and Fisher ratios are doubled relative to the base config so
+# the total token volume still matches the NFSM baseline once ShareGPT is gone.
+training:
+  output_dir: "${CHECKPOINT_ROOT}/def_fsm_hh_only"
+  loss_function: "loss_modification"
+  normalize_by_count: false
+
+dataset:
+  assistant:
+    dataset_ratios:
+      switchboard: 0.1733
+      fisher: 0.0493
+      shareGPT: 0.0
+      synthetic: 0.0
+    dataset_loss_weights:
+      switchboard: [0.5, 0.5]
+      fisher: [0.5, 0.5]
+      shareGPT: [0.5, 0.5]
+      synthetic: [0.5, 0.5]

@@ -1,0 +1,19 @@
+# Ablation: Human-Agent tapes only, no Human-Human data. Uses plain
+# cross-entropy, like the other data-composition ablations.
+training:
+  output_dir: "${CHECKPOINT_ROOT}/def_fsm_ha_only"
+  loss_function: "loss_modification"
+  normalize_by_count: false
+
+dataset:
+  assistant:
+    dataset_ratios:
+      switchboard: 0.0
+      fisher: 0.0
+      shareGPT: 0.4531
+      synthetic: 0.0
+    dataset_loss_weights:
+      switchboard: [0.5, 0.5]
+      fisher: [0.5, 0.5]
+      shareGPT: [0.5, 0.5]
+      synthetic: [0.5, 0.5]

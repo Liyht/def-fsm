@@ -1,0 +1,1488 @@
+diff --git a/requirements.txt b/requirements.txt
+index 44ace7b..4825202 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -12,6 +12,8 @@ tqdm
+ tiktoken
+ 
+ # both Whisper and SimulWhisper. SimulWhisper requires <3
+-triton>=2.0.0,<3;platform_machine=="x86_64" and sys_platform=="linux" or sys_platform=="linux2"
++# triton>=2.0.0,<3;platform_machine=="x86_64" and sys_platform=="linux" or sys_platform=="linux2"
+ 
++# Relaxed: the Triton >= 3 compatibility fix in whisper/triton_ops.py needs it.
++triton>=2.0.0;platform_machine=="x86_64" and sys_platform=="linux" or sys_platform=="linux2"
+ 
+diff --git a/simul_whisper/config.py b/simul_whisper/config.py
+index e1584e6..4e47c61 100644
+--- a/simul_whisper/config.py
++++ b/simul_whisper/config.py
+@@ -3,29 +3,34 @@
+ from dataclasses import dataclass, field
+ from typing import Literal
+ 
++
+ @dataclass
+ class SimulWhisperConfig:
+-    '''Options that are common for all simul policies that could be implemented in SimulWhisper.'''
++    """Options that are common for all simul policies that could be implemented in SimulWhisper."""
++
+     model_path: str
+     language: str = field(default="zh")
+     nonspeech_prob: float = 1.0
+     audio_min_len: float = 1.0
+-    decoder_type: Literal["greedy","beam"] = "greedy"
++    decoder_type: Literal["greedy", "beam"] = "greedy"
+     beam_size: int = 5
+-    task: Literal["transcribe","translate"] = "transcribe"
++    task: Literal["transcribe", "translate"] = "transcribe"
+     init_prompt: str = field(default=None)
+     static_init_prompt: str = field(default=None)
+     max_context_tokens: int = field(default=None)
++    device: str = "cuda:0"
+ 
+     logdir: str = field(default="logdir", metadata={"help": "Directory to save audio segments and tokens for debugging purposes."})
+ 
++
+ @dataclass
+ class AlignAttConfig(SimulWhisperConfig):
+-    '''Options specific to the AlignAtt policy.'''
++    """Options specific to the AlignAtt policy."""
++
+     eval_data_path: str = "tmp"
+-    segment_length: float = field(default=1.0, metadata = {"help": "in second"})
++    segment_length: float = field(default=1.0, metadata={"help": "in second"})
+     frame_threshold: int = 4
+-    rewind_threshold: int = 200 # in frames. Max value is 1500. Higher value turns rewinds off.
++    rewind_threshold: int = 200  # in frames. Max value is 1500. Higher value turns rewinds off.
+     audio_max_len: float = 30.0
+     cif_ckpt_path: str = ""
+-    never_fire: bool = False
+\ No newline at end of file
++    never_fire: bool = False
+diff --git a/simul_whisper/simul_whisper.py b/simul_whisper/simul_whisper.py
+index b0f3649..b366b36 100644
+--- a/simul_whisper/simul_whisper.py
++++ b/simul_whisper/simul_whisper.py
+@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
+ import sys
+ import wave
+ 
+-# New features added to the original version of Simul-Whisper: 
++
++# New features added to the original version of Simul-Whisper:
+ # - large-v3 model support
+ # - translation support
+ # - beam search
+@@ -40,38 +41,35 @@ class PaddedAlignAttWhisper:
+             os.makedirs(cfg.logdir)
+         model_name = os.path.basename(cfg.model_path).replace(".pt", "")
+         model_path = os.path.dirname(os.path.abspath(cfg.model_path))
+-        self.model = load_model(name=model_name, download_root=model_path)
++        self.model = load_model(name=model_name, device=cfg.device, download_root=model_path)
+ 
+         logger.info(f"Model dimensions: {self.model.dims}")
+ 
+-        self.decode_options = DecodingOptions(
+-            language = cfg.language, 
+-            without_timestamps = True,
+-            task=cfg.task
+-        )
++        self.decode_options = DecodingOptions(language=cfg.language, without_timestamps=True, task=cfg.task)
+         self.tokenizer_is_multilingual = not model_name.endswith(".en")
+         self.create_tokenizer(cfg.language if cfg.language != "auto" else None)
+         self.detected_language = cfg.language if cfg.language != "auto" else None
+-        
++
+         self.max_text_len = self.model.dims.n_text_ctx
+         self.num_decoder_layers = len(self.model.decoder.blocks)
+         self.cfg = cfg
+ 
+         # model to detect end-of-word boundary at the end of the segment
+-        self.CIFLinear, self.always_fire, self.never_fire = load_cif(cfg,
+-                                                                     n_audio_state=self.model.dims.n_audio_state,
+-                                                                     device=self.model.device)
++        self.CIFLinear, self.always_fire, self.never_fire = load_cif(cfg, n_audio_state=self.model.dims.n_audio_state, device=self.model.device)
+ 
+         # install hooks to access encoder-decoder attention
+         self.dec_attns = []
++
+         def layer_hook(module, net_input, net_output):
+             # net_output[1]: B*num_head*token_len*audio_len
+             t = F.softmax(net_output[1], dim=-1)
+             self.dec_attns.append(t.squeeze(0))
++
+         for b in self.model.decoder.blocks:
+             b.cross_attn.register_forward_hook(layer_hook)
+-        
++
+         self.kv_cache = {}
++
+         def kv_hook(module: torch.nn.Linear, _, net_output: torch.Tensor):
+             if module.cache_id not in self.kv_cache or net_output.shape[1] > self.max_text_len:
+                 # save as-is, for the first token or cross attention
+@@ -79,9 +77,9 @@ class PaddedAlignAttWhisper:
+             else:
+                 x = self.kv_cache[module.cache_id]
+                 self.kv_cache[module.cache_id] = torch.cat([x, net_output], dim=1).detach()
+-            return self.kv_cache[module.cache_id] 
++            return self.kv_cache[module.cache_id]
+ 
+-        for i,b in enumerate(self.model.decoder.blocks):
++        for i, b in enumerate(self.model.decoder.blocks):
+             b.attn.key.register_forward_hook(kv_hook)
+             b.attn.value.register_forward_hook(kv_hook)
+             b.cross_attn.key.register_forward_hook(kv_hook)
+@@ -96,20 +94,19 @@ class PaddedAlignAttWhisper:
+             self.align_source[layer_rank] = heads
+             self.num_align_heads += 1
+ 
+-
+         # tokens to be suppressed from decoding, to prevent hallucinations
+         suppress_tokens = [
+-                self.tokenizer.transcribe,
+-                self.tokenizer.translate,
+-                self.tokenizer.sot,
+-                self.tokenizer.sot_prev,
+-                self.tokenizer.sot_lm,
+-                # self.tokenizer.eot 
+-                self.tokenizer.no_timestamps,  # added by DM
+-            ] + list(self.tokenizer.all_language_tokens)  # added by DM
++            self.tokenizer.transcribe,
++            self.tokenizer.translate,
++            self.tokenizer.sot,
++            self.tokenizer.sot_prev,
++            self.tokenizer.sot_lm,
++            # self.tokenizer.eot
++            self.tokenizer.no_timestamps,  # added by DM
++        ] + list(self.tokenizer.all_language_tokens)  # added by DM
+         if self.tokenizer.no_speech is not None:
+             suppress_tokens.append(self.tokenizer.no_speech)
+-        suppress_tokens =  tuple(sorted(set(suppress_tokens)))
++        suppress_tokens = tuple(sorted(set(suppress_tokens)))
+         logger.debug(f"Suppress tokens: {suppress_tokens}")
+         sup_tokens = SuppressTokens(suppress_tokens)
+         self.suppress_tokens = lambda logits: sup_tokens.apply(logits, None)
+@@ -118,7 +115,7 @@ class PaddedAlignAttWhisper:
+         # it's going to be regenerated after lang id
+         self.segments = []
+         self.init_tokens()
+-        
++
+         self.last_attend_frame = -self.cfg.rewind_threshold
+ 
+         if self.cfg.max_context_tokens is None:
+@@ -142,16 +139,11 @@ class PaddedAlignAttWhisper:
+ 
+     def create_tokenizer(self, language=None):
+         self.tokenizer = tokenizer.get_tokenizer(
+-            multilingual=self.tokenizer_is_multilingual,  
+-            language=language,
+-            num_languages=self.model.num_languages,
+-            task=self.decode_options.task
++            multilingual=self.tokenizer_is_multilingual, language=language, num_languages=self.model.num_languages, task=self.decode_options.task
+         )
+ 
+     def init_context(self):
+-        kw = {'tokenizer': self.tokenizer, 
+-              'device': self.model.device, 
+-              'prefix_token_ids': [self.tokenizer.sot_prev]}
++        kw = {"tokenizer": self.tokenizer, "device": self.model.device, "prefix_token_ids": [self.tokenizer.sot_prev]}
+         self.context = TokenBuffer.empty(**kw)
+         if self.cfg.static_init_prompt is not None:
+             self.context = TokenBuffer.from_text(self.cfg.static_init_prompt, **kw)
+@@ -161,29 +153,28 @@ class PaddedAlignAttWhisper:
+     def init_tokens(self):
+         logger.debug(f"init tokens, {len(self.segments)}")
+         # init tokens (mandatory prompt)
+-        self.initial_tokens = torch.tensor(
+-            self.tokenizer.sot_sequence_including_notimestamps, 
+-            dtype=torch.long, 
+-            device=self.model.device).unsqueeze(0)
++        self.initial_tokens = torch.tensor(self.tokenizer.sot_sequence_including_notimestamps, dtype=torch.long, device=self.model.device).unsqueeze(
++            0
++        )
+         self.initial_token_length = self.initial_tokens.shape[1]
+         self.sot_index = self.tokenizer.sot_sequence.index(self.tokenizer.sot)
+-#        self.segments = []
++        #        self.segments = []
+         logger.debug(f"init tokens after, {len(self.segments)}")
+         self.tokens = [self.initial_tokens]
+ 
+     def trim_context(self):
+         logger.info("Trimming context")
+         c = len(self.context.as_token_ids()) - len(self.context.prefix_token_ids)
+-#        logger.debug(f"c= {len(self.context.as_token_ids())}, {len(self.context.prefix_token_ids)}")
++        #        logger.debug(f"c= {len(self.context.as_token_ids())}, {len(self.context.prefix_token_ids)}")
+         logger.info(f"Context text: {self.context.as_text()}")
+-#        logger.debug(f"Context tensor: {self.context.as_tensor()}")
++        #        logger.debug(f"Context tensor: {self.context.as_tensor()}")
+         l = sum(t.shape[1] for t in self.tokens) + c
+-#        logger.debug(f"len {l}, c {c}, max_context_tokens {self.max_context_tokens}")
++        #        logger.debug(f"len {l}, c {c}, max_context_tokens {self.max_context_tokens}")
+         if self.cfg.static_init_prompt is None:
+             after = 0
+         else:
+             after = len(self.cfg.static_init_prompt)
+-#        logger.debug(f"len {l}, c {c}, max_context_tokens {self.max_context_tokens}")
++        #        logger.debug(f"len {l}, c {c}, max_context_tokens {self.max_context_tokens}")
+         while c > self.max_context_tokens or l > self.max_text_len - 20:
+             t = self.context.trim_words(after=after)
+             l -= t
+@@ -191,10 +182,9 @@ class PaddedAlignAttWhisper:
+             logger.debug(f"len {l}, c {c}, max_context_tokens {self.max_context_tokens}")
+             if t == 0:
+                 break
+-#        logger.debug(f"len {l}, c {c}, max_context_tokens {self.max_context_tokens}")
++        #        logger.debug(f"len {l}, c {c}, max_context_tokens {self.max_context_tokens}")
+         logger.info(f"Context after trim: {self.context.text} (len: {l})")
+ 
+-
+     def logits(self, tokens: torch.Tensor, audio_features: torch.Tensor) -> torch.Tensor:
+         if self.cfg.decoder_type == "greedy":
+             logit = self.model.decoder(tokens, audio_features, kv_cache=self.kv_cache)
+@@ -202,13 +192,11 @@ class PaddedAlignAttWhisper:
+             logger.debug(f"Logits shape: {tokens.shape}")
+             logit = self.inference.logits(tokens, audio_features)
+         return logit
+-    
+ 
+     def refresh_segment(self, complete=False):
+-
+         logger.debug("Refreshing segment:")
+         self.init_tokens()
+-        self.last_attend_frame = -self.cfg.rewind_threshold       
++        self.last_attend_frame = -self.cfg.rewind_threshold
+         self.detected_language = None
+         self.init_context()
+         logger.debug(f"Context: {self.context}")
+@@ -220,19 +208,18 @@ class PaddedAlignAttWhisper:
+             self.segments = []
+         self.log_segments += 1
+ 
+-
+     def fire_at_boundary(self, chunked_encoder_feature: torch.Tensor):
+-        if self.always_fire: return True
+-        if self.never_fire: return False
++        if self.always_fire:
++            return True
++        if self.never_fire:
++            return False
+         return fire_at_boundary(chunked_encoder_feature, self.CIFLinear)
+ 
+-
+     def _current_tokens(self):
+-
+         toks = self.tokens
+         # very first infer: duplicate start of seq to beam_size
+         if toks[0].shape[0] == 1:
+-            toks[0] = toks[0].repeat_interleave(self.cfg.beam_size,dim=0)
++            toks[0] = toks[0].repeat_interleave(self.cfg.beam_size, dim=0)
+ 
+         if not self.context.is_empty():
+             context_toks = self.context.as_tensor_beam(self.cfg.beam_size, device=self.model.device)
+@@ -247,12 +234,11 @@ class PaddedAlignAttWhisper:
+         self.debug_print_tokens(current_tokens)
+         return current_tokens
+ 
+-
+     def debug_print_tokens(self, tokens):
+         for i in range(self.cfg.beam_size):
+             logger.debug(self.tokenizer.decode_with_timestamps(tokens[i].tolist()))
+ 
+-    ### audio buffer 
++    ### audio buffer
+ 
+     def segments_len(self):
+         segments_len = sum(s.shape[0] for s in self.segments) / 16000
+@@ -261,7 +247,7 @@ class PaddedAlignAttWhisper:
+     def _apply_minseglen(self):
+         segments_len = self.segments_len()
+         # wait for long enough audio to start
+-        if segments_len < self.cfg.audio_min_len: 
++        if segments_len < self.cfg.audio_min_len:
+             logger.debug("waiting for next segment")
+             return False
+         return True
+@@ -276,17 +262,17 @@ class PaddedAlignAttWhisper:
+         while len(self.segments) > 1 and segments_len > self.cfg.audio_max_len:
+             removed_len = self.segments[0].shape[0] / 16000
+             segments_len -= removed_len
+-            self.last_attend_frame -= int(TOKENS_PER_SECOND*removed_len)
++            self.last_attend_frame -= int(TOKENS_PER_SECOND * removed_len)
+             self.segments = self.segments[1:]
+             logger.debug(f"remove segments: {len(self.segments)} {len(self.tokens)}")
+             if len(self.tokens) > 1:
+-                self.context.append_token_ids(self.tokens[1][0,:])
++                self.context.append_token_ids(self.tokens[1][0, :])
+                 self.tokens = [self.initial_tokens] + self.tokens[2:]
+         return removed_len
+ 
+     def _clean_cache(self):
+-        '''clean the cache that stores the attention matrices and kv_cache.
+-        It must be called every time after generation with the model.'''
++        """clean the cache that stores the attention matrices and kv_cache.
++        It must be called every time after generation with the model."""
+         # cleaning cache
+         self.dec_attns = []
+         self.kv_cache = {}
+@@ -299,7 +285,7 @@ class PaddedAlignAttWhisper:
+         """Language detection from encoder features.
+         This code is trimmed and copy-pasted from whisper.decoding.detect_language .
+         """
+-    
++
+         # forward pass using a single token, startoftranscript
+         n_audio = encoder_features.shape[0]
+         x = torch.tensor([[self.tokenizer.sot]] * n_audio).to(self.model.device)  # [n_audio, 1]
+@@ -312,10 +298,7 @@ class PaddedAlignAttWhisper:
+         language_tokens = logits.argmax(dim=-1)
+         language_token_probs = logits.softmax(dim=-1).cpu()
+         language_probs = [
+-            {
+-                c: language_token_probs[i, j].item()
+-                for j, c in zip(self.tokenizer.all_language_tokens, self.tokenizer.all_language_codes)
+-            }
++            {c: language_token_probs[i, j].item() for j, c in zip(self.tokenizer.all_language_tokens, self.tokenizer.all_language_codes)}
+             for i in range(n_audio)
+         ]
+ 
+@@ -348,30 +331,27 @@ class PaddedAlignAttWhisper:
+         else:
+             input_segments = self.segments[0]
+ 
+-
+-        
+         # mel + padding to 30s
+-        mel_padded = log_mel_spectrogram(input_segments, n_mels=self.model.dims.n_mels, padding=N_SAMPLES, 
+-                                            device=self.model.device).unsqueeze(0)
++        mel_padded = log_mel_spectrogram(input_segments, n_mels=self.model.dims.n_mels, padding=N_SAMPLES, device=self.model.device).unsqueeze(0)
+         # trim to 3000
+         mel = pad_or_trim(mel_padded, N_FRAMES)
+ 
+         # the len of actual audio
+-        content_mel_len = int((mel_padded.shape[2] - mel.shape[2])/2)
++        content_mel_len = int((mel_padded.shape[2] - mel.shape[2]) / 2)
+ 
+         # encode
+         encoder_feature = self.model.encoder(mel)
+ 
+-#        logger.debug(f"Encoder feature shape: {encoder_feature.shape}")
+-#        if mel.shape[-2:] != (self.model.dims.n_audio_ctx, self.model.dims.n_audio_state):
+-#            logger.debug("mel ")
++        #        logger.debug(f"Encoder feature shape: {encoder_feature.shape}")
++        #        if mel.shape[-2:] != (self.model.dims.n_audio_ctx, self.model.dims.n_audio_state):
++        #            logger.debug("mel ")
+         if self.cfg.language == "auto" and self.detected_language is None:
+-            language_tokens, language_probs = self.lang_id(encoder_feature) 
++            language_tokens, language_probs = self.lang_id(encoder_feature)
+             logger.debug(f"Language tokens: {language_tokens}, probs: {language_probs}")
+             top_lan, p = max(language_probs[0].items(), key=lambda x: x[1])
+             logger.info(f"Detected language: {top_lan} with p={p:.4f}")
+-            #self.tokenizer.language = top_lan
+-            #self.tokenizer.__post_init__()
++            # self.tokenizer.language = top_lan
++            # self.tokenizer.__post_init__()
+             self.create_tokenizer(top_lan)
+             self.detected_language = top_lan
+             self.init_tokens()
+@@ -379,10 +359,9 @@ class PaddedAlignAttWhisper:
+ 
+         self.trim_context()
+         current_tokens = self._current_tokens()
+-#        
++        #
+         fire_detected = self.fire_at_boundary(encoder_feature[:, :content_mel_len, :])
+ 
+-
+         ####################### Decoding loop
+         logger.info("Decoding loop starts\n")
+ 
+@@ -393,37 +372,34 @@ class PaddedAlignAttWhisper:
+         most_attended_frame = None
+ 
+         token_len_before_decoding = current_tokens.shape[1]
+-        
++
+         generation_progress = []
+         generation = {
+-            "starting_tokens": BeamTokens(current_tokens[0,:].clone(), self.cfg.beam_size),
++            "starting_tokens": BeamTokens(current_tokens[0, :].clone(), self.cfg.beam_size),
+             "token_len_before_decoding": token_len_before_decoding,
+-            #"fire_detected": fire_detected,
++            # "fire_detected": fire_detected,
+             "frames_len": content_mel_len,
+             "frames_threshold": 4 if is_last else self.cfg.frame_threshold,
+-
+             # to be filled later
+             "logits_starting": None,
+-
+             # to be filled later
+             "no_speech_prob": None,
+             "no_speech": False,
+-
+             # to be filled in the loop
+             "progress": generation_progress,
+         }
+-        while not completed and current_tokens.shape[1] < self.max_text_len: # bos is 3 tokens
++        while not completed and current_tokens.shape[1] < self.max_text_len:  # bos is 3 tokens
+             generation_progress_loop = []
+ 
+             if new_segment:
+                 tokens_for_logits = current_tokens
+             else:
+                 # only need to use the last token except in the first forward pass
+-                tokens_for_logits = current_tokens[:,-1:]
++                tokens_for_logits = current_tokens[:, -1:]
+ 
+-            logits = self.logits(tokens_for_logits, encoder_feature) # B, len(tokens), token dict size
++            logits = self.logits(tokens_for_logits, encoder_feature)  # B, len(tokens), token dict size
+             if new_segment:
+-                generation["logits_starting"] = Logits(logits[:,:,:])
++                generation["logits_starting"] = Logits(logits[:, :, :])
+ 
+             if new_segment and self.tokenizer.no_speech is not None:
+                 probs_at_sot = logits[:, self.sot_index, :].float().softmax(dim=-1)
+@@ -434,26 +410,25 @@ class PaddedAlignAttWhisper:
+                     logger.info("no speech, stop")
+                     break
+ 
+-            logits = logits[:, -1, :] # logits for the last token
+-            generation_progress_loop.append(("logits_before_suppress",Logits(logits)))
++            logits = logits[:, -1, :]  # logits for the last token
++            generation_progress_loop.append(("logits_before_suppress", Logits(logits)))
+ 
+             # supress blank tokens only at the beginning of the segment
+             if new_segment:
+                 logits[:, self.tokenizer.encode(" ") + [self.tokenizer.eot]] = -np.inf
+             new_segment = False
+             self.suppress_tokens(logits)
+-            #generation_progress_loop.append(("logits_after_suppres",BeamLogits(logits[0,:].clone(), self.cfg.beam_size)))
+-            generation_progress_loop.append(("logits_after_suppress",Logits(logits)))
++            # generation_progress_loop.append(("logits_after_suppres",BeamLogits(logits[0,:].clone(), self.cfg.beam_size)))
++            generation_progress_loop.append(("logits_after_suppress", Logits(logits)))
+ 
+             current_tokens, completed = self.token_decoder.update(current_tokens, logits, sum_logprobs)
+-            generation_progress_loop.append(("beam_tokens",Tokens(current_tokens[:,-1].clone())))
+-            generation_progress_loop.append(("sum_logprobs",sum_logprobs.tolist()))
+-            generation_progress_loop.append(("completed",completed))
++            generation_progress_loop.append(("beam_tokens", Tokens(current_tokens[:, -1].clone())))
++            generation_progress_loop.append(("sum_logprobs", sum_logprobs.tolist()))
++            generation_progress_loop.append(("completed", completed))
+ 
+             logger.debug(f"Decoding completed: {completed}, sum_logprobs: {sum_logprobs.tolist()}, tokens: ")
+             self.debug_print_tokens(current_tokens)
+ 
+-
+             # if self.decoder_type == "beam":
+             #     logger.debug(f"Finished sequences: {self.token_decoder.finished_sequences}")
+ 
+@@ -482,32 +457,31 @@ class PaddedAlignAttWhisper:
+             tmp = []
+             for mat in attn_of_alignment_heads:
+                 t = torch.cat(mat, dim=1)
+-                tmp.append(t) 
++                tmp.append(t)
+             attn_of_alignment_heads = torch.stack(tmp, dim=1)
+-#            logger.debug(str(attn_of_alignment_heads.shape) + " tttady")
++            #            logger.debug(str(attn_of_alignment_heads.shape) + " tttady")
+             std, mean = torch.std_mean(attn_of_alignment_heads, dim=-2, keepdim=True, unbiased=False)
+             attn_of_alignment_heads = (attn_of_alignment_heads - mean) / std
+-            attn_of_alignment_heads = median_filter(attn_of_alignment_heads, 7) # from whisper.timing
++            attn_of_alignment_heads = median_filter(attn_of_alignment_heads, 7)  # from whisper.timing
+             attn_of_alignment_heads = attn_of_alignment_heads.mean(dim=1)
+-#            logger.debug(str(attn_of_alignment_heads.shape) + " po mean")
+-            attn_of_alignment_heads = attn_of_alignment_heads[:,:, :content_mel_len]
+-#            logger.debug(str(attn_of_alignment_heads.shape) + " pak ")
++            #            logger.debug(str(attn_of_alignment_heads.shape) + " po mean")
++            attn_of_alignment_heads = attn_of_alignment_heads[:, :, :content_mel_len]
++            #            logger.debug(str(attn_of_alignment_heads.shape) + " pak ")
+ 
+             # for each beam, the most attended frame is:
+-            most_attended_frames = torch.argmax(attn_of_alignment_heads[:,-1,:], dim=-1)
+-            generation_progress_loop.append(("most_attended_frames",most_attended_frames.clone().tolist()))
++            most_attended_frames = torch.argmax(attn_of_alignment_heads[:, -1, :], dim=-1)
++            generation_progress_loop.append(("most_attended_frames", most_attended_frames.clone().tolist()))
+             logger.debug(str(most_attended_frames.tolist()) + " most att frames")
+ 
+             most_attended_frame = most_attended_frames[0].item()
+ 
+-
+             generation_progress.append(dict(generation_progress_loop))
+             logger.debug("current tokens" + str(current_tokens.shape))
+             if completed:
+-            #    # stripping the last token, the eot
++                #    # stripping the last token, the eot
+                 current_tokens = current_tokens[:, :-1]
+                 break
+-            
++
+             # for some rare cases where the attention fails
+             if not is_last and self.last_attend_frame - most_attended_frame > self.cfg.rewind_threshold:
+                 # TODO: check this
+@@ -517,7 +491,8 @@ class PaddedAlignAttWhisper:
+                 else:
+                     logger.debug(
+                         f"[rewind detected] current attention pos: {most_attended_frame}, "
+-                        f"last attention pos: {self.last_attend_frame}; omit this segment")
++                        f"last attention pos: {self.last_attend_frame}; omit this segment"
++                    )
+                     self.last_attend_frame = -self.cfg.rewind_threshold
+                     current_tokens = torch.cat(self.tokens, dim=1) if len(self.tokens) > 0 else self.tokens[0]
+                     break
+@@ -529,28 +504,39 @@ class PaddedAlignAttWhisper:
+                 # stripping the last token, the one that is attended too close to the end
+                 current_tokens = current_tokens[:, :-1]
+                 break
+-        
++
+             # debug print
+             for i in range(self.cfg.beam_size):
+-                logger.debug("attn: {}, current pos: {}, current token: {}({})".format(
+-                    attn_of_alignment_heads.shape if attn_of_alignment_heads is not None else None,
+-                    most_attended_frames[i], 
+-                    current_tokens[i, -1].item(),
+-                    self.tokenizer.decode([current_tokens[i, -1].item()])
+-                ))
+-
+-#        for k,v in generation.items():
+-#            print(k,v,file=sys.stderr)
+-#        for x in generation_progress:
+-#            for y in x.items():
+-#                print("\t\t",*y,file=sys.stderr)
+-#            print("\t","----", file=sys.stderr)
+-#        print("\t", "end of generation_progress_loop", file=sys.stderr)
++                logger.debug(
++                    "attn: {}, current pos: {}, current token: {}({})".format(
++                        attn_of_alignment_heads.shape if attn_of_alignment_heads is not None else None,
++                        most_attended_frames[i],
++                        current_tokens[i, -1].item(),
++                        self.tokenizer.decode([current_tokens[i, -1].item()]),
++                    )
++                )
++
++        #        for k,v in generation.items():
++        #            print(k,v,file=sys.stderr)
++        #        for x in generation_progress:
++        #            for y in x.items():
++        #                print("\t\t",*y,file=sys.stderr)
++        #            print("\t","----", file=sys.stderr)
++        #        print("\t", "end of generation_progress_loop", file=sys.stderr)
+         #    sys.exit(1)
+         ####################### End of decoding loop
+ 
+         logger.info("End of decoding loop")
+ 
++        # Per-token average log-probability of the top beam, reported alongside the text so a
++        # caller can score confidence and filter Whisper's low-confidence hallucinations.
++        generated_len = current_tokens.shape[1] - token_len_before_decoding
++        if generated_len > 0:
++            avg_logprob = sum_logprobs[0].item() / generated_len
++        else:
++            avg_logprob = 0.0
++        generation["avg_logprob"] = avg_logprob
++
+         # if attn_of_alignment_heads is not None:
+         #     seg_len = int(segment.shape[0] / 16000 * TOKENS_PER_SECOND)
+ 
+@@ -566,7 +552,6 @@ class PaddedAlignAttWhisper:
+         #         new_token_max_attn, _ = new_token_attn.max(dim=-1)
+         #         logger.debug(f"segment max attention: {new_token_max_attn.mean().item()/len(self.segments)}")
+ 
+-
+         # let's now operate only with the top beam hypothesis
+         tokens_to_split = current_tokens[0, token_len_before_decoding:]
+         if fire_detected or is_last:
+@@ -577,28 +562,31 @@ class PaddedAlignAttWhisper:
+             generation["result"] = {"split_words": split_words[:-1], "split_tokens": split_tokens[:-1]}
+             generation["result_truncated"] = {"split_words": split_words[-1:], "split_tokens": split_tokens[-1:]}
+ 
+-#            text_to_split = self.tokenizer.decode(tokens_to_split)
+-#            logger.debug(f"text_to_split: {text_to_split}")
+-#            logger.debug("text at current step: {}".format(text_to_split.replace(" ", "<space>")))
+-#            text_before_space = " ".join(text_to_split.split(" ")[:-1])
+-#            logger.debug("before the last space: {}".format(text_before_space.replace(" ", "<space>")))
++            #            text_to_split = self.tokenizer.decode(tokens_to_split)
++            #            logger.debug(f"text_to_split: {text_to_split}")
++            #            logger.debug("text at current step: {}".format(text_to_split.replace(" ", "<space>")))
++            #            text_before_space = " ".join(text_to_split.split(" ")[:-1])
++            #            logger.debug("before the last space: {}".format(text_before_space.replace(" ", "<space>")))
+             if len(split_words) > 1:
+-                new_hypothesis = [i for sublist in split_tokens[:-1] for i in sublist]  
++                new_hypothesis = [i for sublist in split_tokens[:-1] for i in sublist]
+             else:
+                 new_hypothesis = []
+ 
+-
+         ### new hypothesis
+         logger.debug(f"new_hypothesis: {new_hypothesis}")
+-        new_tokens = torch.tensor([new_hypothesis], dtype=torch.long).repeat_interleave(self.cfg.beam_size, dim=0).to(
+-            device=self.model.device,
++        new_tokens = (
++            torch.tensor([new_hypothesis], dtype=torch.long)
++            .repeat_interleave(self.cfg.beam_size, dim=0)
++            .to(
++                device=self.model.device,
++            )
+         )
+         self.tokens.append(new_tokens)
+         # TODO: test if this is redundant or not
+-#        ret = ret[ret<DEC_PAD]
++        #        ret = ret[ret<DEC_PAD]
+ 
+         logger.info(f"Output: {self.tokenizer.decode(new_hypothesis)}")
+-        
++
+         self._clean_cache()
+ 
+         self.logdir_save(input_segments, new_hypothesis, generation)
+@@ -642,8 +630,8 @@ class PaddedAlignAttWhisper:
+                 context = generation["starting_tokens"].as_text(self.tokenizer)
+             else:
+                 context = ""
+-            print("CONTEXT+FORCED:",context,sep="\t",file=f)
++            print("CONTEXT+FORCED:", context, sep="\t", file=f)
+             print("HYPOTHESIS:", text, sep="\t", file=f)
+ 
+         # TODO: generation progress can be also saved in a readable format
+-        #logger.debug(f"generation progress: {generation}")
+\ No newline at end of file
++        # logger.debug(f"generation progress: {generation}")
+diff --git a/simul_whisper/whisper/triton_ops.py b/simul_whisper/whisper/triton_ops.py
+index edd4564..a6d1740 100644
+--- a/simul_whisper/whisper/triton_ops.py
++++ b/simul_whisper/whisper/triton_ops.py
+@@ -11,9 +11,7 @@ except ImportError:
+ 
+ 
+ @triton.jit
+-def dtw_kernel(
+-    cost, trace, x, x_stride, cost_stride, trace_stride, N, M, BLOCK_SIZE: tl.constexpr
+-):
++def dtw_kernel(cost, trace, x, x_stride, cost_stride, trace_stride, N, M, BLOCK_SIZE: tl.constexpr):
+     offsets = tl.arange(0, BLOCK_SIZE)
+     mask = offsets < M
+ 
+@@ -43,9 +41,7 @@ def dtw_kernel(
+ @lru_cache(maxsize=None)
+ def median_kernel(filter_width: int):
+     @triton.jit
+-    def kernel(
+-        y, x, x_stride, y_stride, BLOCK_SIZE: tl.constexpr
+-    ):  # x.shape[-1] == filter_width
++    def kernel(y, x, x_stride, y_stride, BLOCK_SIZE: tl.constexpr):  # x.shape[-1] == filter_width
+         row_idx = tl.program_id(0)
+         offsets = tl.arange(0, BLOCK_SIZE)
+         mask = offsets < y_stride
+@@ -60,37 +56,39 @@ def median_kernel(filter_width: int):
+         tl.store(y_ptr + offsets, MIDDLE_ROW_HERE, mask=mask)  # noqa: F821
+ 
+     kernel = triton.JITFunction(kernel.fn)
+-    kernel.src = kernel.src.replace(
+-        "    LOAD_ALL_ROWS_HERE",
+-        "\n".join(
+-            [
+-                f"    row{i} = tl.load(x_ptr + offsets + {i}, mask=mask)"
+-                for i in range(filter_width)
+-            ]
+-        ),
++    # Triton >= 3 rejects assignment to JITFunction.src in __setattr__, because writing it
++    # invalidates the cache key. The template substitutions below therefore go through
++    # _unsafe_update_src(), which performs the write and clears .hash.
++    kernel._unsafe_update_src(
++        kernel.src.replace(
++            "    LOAD_ALL_ROWS_HERE",
++            "\n".join([f"    row{i} = tl.load(x_ptr + offsets + {i}, mask=mask)" for i in range(filter_width)]),
++        )
+     )
+-    kernel.src = kernel.src.replace(
+-        "    BUBBLESORT_HERE",
+-        "\n\n".join(
+-            [
+-                "\n\n".join(
+-                    [
+-                        "\n".join(
+-                            [
+-                                f"    smaller = tl.where(row{j} < row{j + 1}, row{j}, row{j + 1})",
+-                                f"    larger = tl.where(row{j} > row{j + 1}, row{j}, row{j + 1})",
+-                                f"    row{j} = smaller",
+-                                f"    row{j + 1} = larger",
+-                            ]
+-                        )
+-                        for j in range(filter_width - i - 1)
+-                    ]
+-                )
+-                for i in range(filter_width // 2 + 1)
+-            ]
+-        ),
++    kernel._unsafe_update_src(
++        kernel.src.replace(
++            "    BUBBLESORT_HERE",
++            "\n\n".join(
++                [
++                    "\n\n".join(
++                        [
++                            "\n".join(
++                                [
++                                    f"    smaller = tl.where(row{j} < row{j + 1}, row{j}, row{j + 1})",
++                                    f"    larger = tl.where(row{j} > row{j + 1}, row{j}, row{j + 1})",
++                                    f"    row{j} = smaller",
++                                    f"    row{j + 1} = larger",
++                                ]
++                            )
++                            for j in range(filter_width - i - 1)
++                        ]
++                    )
++                    for i in range(filter_width // 2 + 1)
++                ]
++            ),
++        )
+     )
+-    kernel.src = kernel.src.replace("MIDDLE_ROW_HERE", f"row{filter_width // 2}")
++    kernel._unsafe_update_src(kernel.src.replace("MIDDLE_ROW_HERE", f"row{filter_width // 2}"))
+ 
+     return kernel
+ 
+diff --git a/simulstreaming_whisper.py b/simulstreaming_whisper.py
+index 123ef45..ae25919 100644
+--- a/simulstreaming_whisper.py
++++ b/simulstreaming_whisper.py
+@@ -10,43 +10,68 @@ from simul_whisper.simul_whisper import PaddedAlignAttWhisper
+ 
+ logger = logging.getLogger(__name__)
+ 
++
+ def simulwhisper_args(parser):
+-    group = parser.add_argument_group('Whisper arguments')
+-    group.add_argument('--model_path', type=str, default='./large-v3.pt', 
+-                        help='The file path to the Whisper .pt model. If not present on the filesystem, the model is downloaded automatically.')
+-    group.add_argument("--beams","-b", type=int, default=1, help="Number of beams for beam search decoding. If 1, GreedyDecoder is used.")
+-    group.add_argument("--decoder",type=str, default=None, help="Override automatic selection of beam or greedy decoder. "
+-                        "If beams > 1 and greedy: invalid.")
+-
+-    group = parser.add_argument_group('Audio buffer')
+-    group.add_argument('--audio_max_len', type=float, default=30.0, 
+-                        help='Max length of the audio buffer, in seconds.')
+-    group.add_argument('--audio_min_len', type=float, default=0.0, 
+-                        help='Skip processing if the audio buffer is shorter than this length, in seconds. Useful when the --min-chunk-size is small.')
+-
+-
+-    group = parser.add_argument_group('AlignAtt argument')
+-    group.add_argument('--frame_threshold', type=int, default=25, 
+-                        help='Threshold for the attention-guided decoding. The AlignAtt policy will decode only ' \
+-                            'until this number of frames from the end of audio. In frames: one frame is 0.02 seconds for large-v3 model. ')
+-
+-    group = parser.add_argument_group('Truncation of the last decoded word (from Simul-Whisper)')
+-    group.add_argument('--cif_ckpt_path', type=str, default=None, 
+-                        help='The file path to the Simul-Whisper\'s CIF model checkpoint that detects whether there is' \
+-                        'end of word at the end of the chunk. If not, the last decoded space-separated word is truncated ' \
+-                        'because it is often wrong -- transcribing a word in the middle.' \
+-                        'The CIF model adapted for the Whisper model version should be used. ' \
+-                        'Find the models in https://github.com/backspacetg/simul_whisper/tree/main/cif_models . ' \
+-                        'Note that there is no model for large-v3.')
+-    group.add_argument("--never_fire", action=argparse.BooleanOptionalAction, default=False, 
+-                       help="Override the CIF model. If True, the last word is NEVER truncated, no matter what the CIF model detects. " \
+-                       ". If False: if CIF model path is set, the last word is SOMETIMES truncated, depending on the CIF detection. " \
+-                        "Otherwise, if the CIF model path is not set, the last word is ALWAYS trimmed.")
++    group = parser.add_argument_group("Whisper arguments")
++    group.add_argument(
++        "--model_path",
++        type=str,
++        default="./large-v3.pt",
++        help="The file path to the Whisper .pt model. If not present on the filesystem, the model is downloaded automatically.",
++    )
++    group.add_argument("--beams", "-b", type=int, default=1, help="Number of beams for beam search decoding. If 1, GreedyDecoder is used.")
++    group.add_argument(
++        "--decoder", type=str, default=None, help="Override automatic selection of beam or greedy decoder. If beams > 1 and greedy: invalid."
++    )
++
++    group = parser.add_argument_group("Audio buffer")
++    group.add_argument("--audio_max_len", type=float, default=30.0, help="Max length of the audio buffer, in seconds.")
++    group.add_argument(
++        "--audio_min_len",
++        type=float,
++        default=0.0,
++        help="Skip processing if the audio buffer is shorter than this length, in seconds. Useful when the --min-chunk-size is small.",
++    )
++
++    group = parser.add_argument_group("AlignAtt argument")
++    group.add_argument(
++        "--frame_threshold",
++        type=int,
++        default=25,
++        help="Threshold for the attention-guided decoding. The AlignAtt policy will decode only "
++        "until this number of frames from the end of audio. In frames: one frame is 0.02 seconds for large-v3 model. ",
++    )
++
++    group = parser.add_argument_group("Truncation of the last decoded word (from Simul-Whisper)")
++    group.add_argument(
++        "--cif_ckpt_path",
++        type=str,
++        default=None,
++        help="The file path to the Simul-Whisper's CIF model checkpoint that detects whether there is"
++        "end of word at the end of the chunk. If not, the last decoded space-separated word is truncated "
++        "because it is often wrong -- transcribing a word in the middle."
++        "The CIF model adapted for the Whisper model version should be used. "
++        "Find the models in https://github.com/backspacetg/simul_whisper/tree/main/cif_models . "
++        "Note that there is no model for large-v3.",
++    )
++    group.add_argument(
++        "--never_fire",
++        action=argparse.BooleanOptionalAction,
++        default=False,
++        help="Override the CIF model. If True, the last word is NEVER truncated, no matter what the CIF model detects. "
++        ". If False: if CIF model path is set, the last word is SOMETIMES truncated, depending on the CIF detection. "
++        "Otherwise, if the CIF model path is not set, the last word is ALWAYS trimmed.",
++    )
+ 
+     group = parser.add_argument_group("Prompt and context")
+-    group.add_argument("--init_prompt",type=str, default=None, help="Init prompt for the model. It should be in the target language.")
+-    group.add_argument("--static_init_prompt",type=str, default=None, help="Do not scroll over this text. It can contain terminology that should be relevant over all document.")
+-    group.add_argument("--max_context_tokens",type=int, default=None, help="Max context tokens for the model. Default is 0.")
++    group.add_argument("--init_prompt", type=str, default=None, help="Init prompt for the model. It should be in the target language.")
++    group.add_argument(
++        "--static_init_prompt",
++        type=str,
++        default=None,
++        help="Do not scroll over this text. It can contain terminology that should be relevant over all document.",
++    )
++    group.add_argument("--max_context_tokens", type=int, default=None, help="Max context tokens for the model. Default is 0.")
+ 
+ 
+ def simul_asr_factory(args):
+@@ -62,13 +87,28 @@ def simul_asr_factory(args):
+     else:
+         if decoder is None:
+             decoder = "greedy"
+-        elif decoder not in ("beam","greedy"):
++        elif decoder not in ("beam", "greedy"):
+             raise ValueError("Invalid decoder type. Use 'beam' or 'greedy'.")
+-        # else: it is greedy or beam, that's ok 
+-    
+-    a = { v:getattr(args, v) for v in ["model_path", "cif_ckpt_path", "frame_threshold", "audio_min_len", "audio_max_len", "beams", "task",
+-                                       "never_fire", 'init_prompt', 'static_init_prompt', 'max_context_tokens', "logdir"
+-                                       ]}
++        # else: it is greedy or beam, that's ok
++
++    a = {
++        v: getattr(args, v)
++        for v in [
++            "model_path",
++            "cif_ckpt_path",
++            "frame_threshold",
++            "audio_min_len",
++            "audio_max_len",
++            "beams",
++            "task",
++            "never_fire",
++            "init_prompt",
++            "static_init_prompt",
++            "max_context_tokens",
++            "logdir",
++            "device",
++        ]
++    }
+     a["language"] = args.lan
+     a["segment_length"] = args.min_chunk_size
+     a["decoder_type"] = decoder
+@@ -81,21 +121,38 @@ def simul_asr_factory(args):
+     asr = SimulWhisperASR(**a)
+     return asr, SimulWhisperOnline(asr)
+ 
++
+ class SimulWhisperASR(ASRBase):
+-    
+     sep = " "
+ 
+-    def __init__(self, language, model_path, cif_ckpt_path, frame_threshold, audio_max_len, audio_min_len, segment_length, beams, task, 
+-                 decoder_type, never_fire, init_prompt, static_init_prompt, max_context_tokens, logdir):
++    def __init__(
++        self,
++        language,
++        model_path,
++        cif_ckpt_path,
++        frame_threshold,
++        audio_max_len,
++        audio_min_len,
++        segment_length,
++        beams,
++        task,
++        decoder_type,
++        never_fire,
++        init_prompt,
++        static_init_prompt,
++        max_context_tokens,
++        logdir,
++        device,
++    ):
+         cfg = AlignAttConfig(
+-            model_path=model_path, 
++            model_path=model_path,
+             segment_length=segment_length,
+             frame_threshold=frame_threshold,
+             language=language,
+-            audio_max_len=audio_max_len, 
++            audio_max_len=audio_max_len,
+             audio_min_len=audio_min_len,
+             cif_ckpt_path=cif_ckpt_path,
+-            decoder_type=decoder_type, #"greedy" if beams==1 else "beam",
++            decoder_type=decoder_type,  # "greedy" if beams==1 else "beam",
+             beam_size=beams,
+             task=task,
+             never_fire=never_fire,
+@@ -103,22 +160,22 @@ class SimulWhisperASR(ASRBase):
+             max_context_tokens=max_context_tokens,
+             static_init_prompt=static_init_prompt,
+             logdir=logdir,
++            device=device,
+         )
+         logger.info(f"Language: {language}")
+         self.model = PaddedAlignAttWhisper(cfg)
+ 
+     def transcribe(self, audio, init_prompt=""):
+-        logger.info("SimulWhisperASR's transcribe() should not be used. It's here only temporarily." \
+-        "Instead, use SimulWhisperOnline.process_iter().")
++        logger.info("SimulWhisperASR's transcribe() should not be used. It's here only temporarily.Instead, use SimulWhisperOnline.process_iter().")
+         raise NotImplementedError("Use SimulWhisperOnline.process_iter() instead of transcribe().")
+ 
+     def warmup(self, audio, init_prompt=""):
+         self.model.insert_audio(audio)
+         self.model.infer(True)
+         self.model.refresh_segment(complete=True)
+-    
++
+     def use_vad(self):
+-        print("VAD not implemented",file=sys.stderr)
++        print("VAD not implemented", file=sys.stderr)
+ 
+     def set_translate_task(self):
+         # this is not used. Translate task is set another way.
+@@ -126,7 +183,6 @@ class SimulWhisperASR(ASRBase):
+ 
+ 
+ class SimulWhisperOnline(OnlineProcessorInterface):
+-
+     def __init__(self, asr):
+         self.model = asr.model
+         self.file = None
+@@ -165,24 +221,19 @@ class SimulWhisperOnline(OnlineProcessorInterface):
+         if frames and self.unicode_buffer != []:
+             a = [frames[0]] * len(self.unicode_buffer)
+             frames = a + frames
+-            
++
+         tokens = tokens.copy()
+         ret = []
+-        for sw,st in zip(split_words,split_tokens):
++        for sw, st in zip(split_words, split_tokens):
+             b = None
+             for stt in st:
+-                t,f = tokens.pop(0), frames.pop(0)
++                t, f = tokens.pop(0), frames.pop(0)
+                 if t != stt:
+                     raise ValueError(f"Token mismatch: {t} != {stt} at frame {f}.")
+                 if b is None:
+                     b = f
+             e = f
+-            out = {
+-                'start': b * 0.02 + self.audio_bufer_offset,
+-                'end': e * 0.02 + self.audio_bufer_offset,
+-                'text': sw,
+-                'tokens': st
+-                }
++            out = {"start": b * 0.02 + self.audio_bufer_offset, "end": e * 0.02 + self.audio_bufer_offset, "text": sw, "tokens": st}
+             ret.append(out)
+             logger.debug(f"TS-WORD-INFO: {out}")
+         return ret
+@@ -198,7 +249,7 @@ class SimulWhisperOnline(OnlineProcessorInterface):
+             tokens = self.unicode_buffer + tokens
+             self.unicode_buffer = []  # clear the buffer after processing
+         chars, _ = self.model.tokenizer.split_tokens_on_unicode(tokens)
+-        if len(chars) > 0 and chars[-1].endswith('�'):
++        if len(chars) > 0 and chars[-1].endswith("�"):
+             self.unicode_buffer = tokens[-1:]  # keep the last incomplete unicode character
+             logger.debug(f"Hiding incomplete unicode character: {tokens[-1:]}")
+             return tokens[:-1]  # remove the last token, which is incomplete unicode character
+@@ -222,27 +273,28 @@ class SimulWhisperOnline(OnlineProcessorInterface):
+         text = self.model.tokenizer.decode(tokens)
+         if len(text) == 0:
+             return {}
+-        
++
+         # word-level timestamps
+         ts_words = self.timestamped_text(tokens, generation_progress)
+-        
+-        self.beg = min(word['start'] for word in ts_words)  # it should be this
++
++        self.beg = min(word["start"] for word in ts_words)  # it should be this
+         self.beg = max(self.beg, self.last_ts + 0.001)  # but let's create the timestamps non-decreasing -- at least last beg + 1
+         if self.is_last:
+             e = self.end
+         else:
+-            e = max(word['end'] for word in ts_words)
++            e = max(word["end"] for word in ts_words)
+         e = max(e, self.beg + 0.001)
+ 
+         self.last_ts = e
+ 
+         # return (self.beg,e,text)
+         return {
+-            'start': self.beg,
+-            'end': e,
+-            'text': text,
+-            'tokens': tokens,
+-            'words': ts_words
++            "start": self.beg,
++            "end": e,
++            "text": text,
++            "tokens": tokens,
++            "words": ts_words,
++            "avg_logprob": generation_progress.get("avg_logprob", 0.0),
+         }
+ 
+     def finish(self):
+@@ -252,9 +304,9 @@ class SimulWhisperOnline(OnlineProcessorInterface):
+         self.is_last = False
+         self.model.refresh_segment(complete=True)
+         return o
+-    
+ 
+-if __name__ == "__main__":
+ 
++if __name__ == "__main__":
+     from whisper_streaming.whisper_online_main import main_simulation_from_file
+-    main_simulation_from_file(simul_asr_factory, add_args=simulwhisper_args)
+\ No newline at end of file
++
++    main_simulation_from_file(simul_asr_factory, add_args=simulwhisper_args)
+diff --git a/whisper_streaming/vac_online_processor.py b/whisper_streaming/vac_online_processor.py
+index 20015f1..1ed7997 100644
+--- a/whisper_streaming/vac_online_processor.py
++++ b/whisper_streaming/vac_online_processor.py
+@@ -3,18 +3,20 @@ from whisper_streaming.silero_vad_iterator import FixedVADIterator
+ import numpy as np
+ 
+ import logging
++
+ logger = logging.getLogger(__name__)
+ import sys
+ 
++
+ class VACOnlineASRProcessor(OnlineProcessorInterface):
+-    '''Wraps OnlineASRProcessor with VAC (Voice Activity Controller).
++    """Wraps OnlineASRProcessor with VAC (Voice Activity Controller).
+ 
+     It works the same way as OnlineASRProcessor: it receives chunks of audio (e.g. 0.04 seconds),
+     it runs VAD and continuously detects whether there is speech or not.
+     When it detects end of speech (non-voice for 500ms), it makes OnlineASRProcessor to end the utterance immediately.
+-    '''
++    """
+ 
+-    def __init__(self, online_chunk_size, online, min_buffered_length=1):
++    def __init__(self, online_chunk_size, online, min_buffered_length=1, min_silence_duration_ms=500):
+         self.online_chunk_size = online_chunk_size
+         self.online = online
+ 
+@@ -22,11 +24,16 @@ class VACOnlineASRProcessor(OnlineProcessorInterface):
+ 
+         # VAC:
+         import torch
+-        model, _ = torch.hub.load(
+-            repo_or_dir='snakers4/silero-vad',
+-            model='silero_vad'
+-        )
+-        self.vac = FixedVADIterator(model)  # we use the default options there: 500ms silence, 100ms padding, etc.
++
++        model, _ = torch.hub.load(repo_or_dir="snakers4/silero-vad", model="silero_vad")
++        self.vac = FixedVADIterator(
++            model, min_silence_duration_ms=min_silence_duration_ms
++        )  # we use the default options there: 500ms silence, 100ms padding, etc.
++
++        # Silence accounting: non-speech time is accumulated here and reported in whole units of
++        # min_silence_duration_ms, which the caller turns into the <SIL> tokens of the tape.
++        self.silence_accumulator = 0.0
++        self.silence_threshold = min_silence_duration_ms / 1000
+ 
+         self.init()
+ 
+@@ -38,11 +45,13 @@ class VACOnlineASRProcessor(OnlineProcessorInterface):
+         self.is_currently_final = False
+ 
+         self.status = None  # or "voice" or "nonvoice"
+-        self.audio_buffer = np.array([],dtype=np.float32)
++        self.audio_buffer = np.array([], dtype=np.float32)
+         self.buffer_offset = 0  # in frames
+ 
++        self.silence_accumulator = 0.0
++
+     def clear_buffer(self):
+-        self.audio_buffer = np.array([],dtype=np.float32)
++        self.audio_buffer = np.array([], dtype=np.float32)
+ 
+     def insert_audio_chunk(self, audio):
+         res = self.vac(audio)
+@@ -50,16 +59,17 @@ class VACOnlineASRProcessor(OnlineProcessorInterface):
+         if res is not None:
+             frame = list(res.values())[0] - self.buffer_offset
+             frame = max(0, frame)
+-            if 'start' in res and 'end' not in res:
+-                self.status = 'voice'
++            self.silence_accumulator = 0.0
++            if "start" in res and "end" not in res:
++                self.status = "voice"
+                 send_audio = self.audio_buffer[frame:]
+-                self.online.init(offset=(frame + self.buffer_offset)/self.SAMPLING_RATE)
++                self.online.init(offset=(frame + self.buffer_offset) / self.SAMPLING_RATE)
+                 self.online.insert_audio_chunk(send_audio)
+                 self.current_online_chunk_buffer_size += len(send_audio)
+                 self.buffer_offset += len(self.audio_buffer)
+                 self.clear_buffer()
+-            elif 'end' in res and 'start' not in res:
+-                self.status = 'nonvoice'
++            elif "end" in res and "start" not in res:
++                self.status = "nonvoice"
+                 if frame > 0:
+                     send_audio = self.audio_buffer[:frame]
+                     self.online.insert_audio_chunk(send_audio)
+@@ -71,10 +81,10 @@ class VACOnlineASRProcessor(OnlineProcessorInterface):
+             else:
+                 beg = max(0, res["start"] - self.buffer_offset)
+                 end = max(0, res["end"] - self.buffer_offset)
+-                self.status = 'nonvoice'
++                self.status = "nonvoice"
+                 if beg < end:
+                     send_audio = self.audio_buffer[beg:end]
+-                    self.online.init(offset=((beg + self.buffer_offset)/self.SAMPLING_RATE))
++                    self.online.init(offset=((beg + self.buffer_offset) / self.SAMPLING_RATE))
+                     self.online.insert_audio_chunk(send_audio)
+                     self.current_online_chunk_buffer_size += len(send_audio)
+                 self.is_currently_final = True
+@@ -82,7 +92,8 @@ class VACOnlineASRProcessor(OnlineProcessorInterface):
+                 self.buffer_offset += len(self.audio_buffer) - keep_frames
+                 self.audio_buffer = self.audio_buffer[-keep_frames:]
+         else:
+-            if self.status == 'voice':
++            if self.status == "voice":
++                self.silence_accumulator = 0.0
+                 self.online.insert_audio_chunk(self.audio_buffer)
+                 self.current_online_chunk_buffer_size += len(self.audio_buffer)
+                 self.buffer_offset += len(self.audio_buffer)
+@@ -90,22 +101,42 @@ class VACOnlineASRProcessor(OnlineProcessorInterface):
+             else:
+                 # We keep 1 second because VAD may later find start of voice in it.
+                 # But we trim it to prevent OOM.
++                chunk_duration = len(audio) / self.SAMPLING_RATE
++                self.silence_accumulator += chunk_duration
++
+                 self.buffer_offset += max(0, len(self.audio_buffer) - self.min_buffered_frames)
+-                self.audio_buffer = self.audio_buffer[-self.min_buffered_frames:]
++                self.audio_buffer = self.audio_buffer[-self.min_buffered_frames :]
+ 
+     def process_iter(self):
+         if self.is_currently_final:
+             return self.finish()
+-        elif self.current_online_chunk_buffer_size > self.SAMPLING_RATE*self.online_chunk_size:
++        elif self.current_online_chunk_buffer_size > self.SAMPLING_RATE * self.online_chunk_size:
+             self.current_online_chunk_buffer_size = 0
+             ret = self.online.process_iter()
+             return ret
+         else:
++            # No transcription this iteration, so report how much silence has gone by instead,
++            # as a whole number of silence units. The remainder is carried to the next call.
++            silence_count = 0
++            if self.silence_accumulator >= self.silence_threshold:
++                silence_count = int(self.silence_accumulator // self.silence_threshold)
++                self.silence_accumulator -= silence_count * self.silence_threshold
++
++            if silence_count > 0:
++                return {"vac_silence_count": silence_count}
++
+             logger.info(f"no online update, only VAD. {self.status}")
+             return {}
+ 
+     def finish(self):
+         ret = self.online.finish()
++        if ret is None:
++            ret = {}
++        # finish() is only reached because the VAD just cut the speech off, which means at least
++        # one silence unit has elapsed regardless of what the accumulator holds.
++        ret["vac_silence_count"] = 1
++        self.silence_accumulator = 0.0
++
+         self.current_online_chunk_buffer_size = 0
+         self.is_currently_final = False
+-        return ret
+\ No newline at end of file
++        return ret
+diff --git a/whisper_streaming/whisper_online_main.py b/whisper_streaming/whisper_online_main.py
+index b6fe1f6..87e1a4f 100644
+--- a/whisper_streaming/whisper_online_main.py
++++ b/whisper_streaming/whisper_online_main.py
+@@ -1,8 +1,8 @@
+ #!/usr/bin/env python3
+ 
+ # This code is retrieved from the original WhisperStreaming whisper_online.py .
+-# It is refactored and simplified. Only the code that is needed for the 
+-# SimulWhisper backend is kept. 
++# It is refactored and simplified. Only the code that is needed for the
++# SimulWhisper backend is kept.
+ 
+ 
+ import sys
+@@ -15,58 +15,67 @@ import logging
+ 
+ logger = logging.getLogger(__name__)
+ 
++
+ @lru_cache(10**6)
+ def load_audio(fname):
+     a, _ = librosa.load(fname, sr=16000, dtype=np.float32)
+     return a
+ 
++
+ def load_audio_chunk(fname, beg, end):
+     audio = load_audio(fname)
+-    beg_s = int(beg*16000)
+-    end_s = int(end*16000)
++    beg_s = int(beg * 16000)
++    end_s = int(end * 16000)
+     return audio[beg_s:end_s]
+ 
++
+ def processor_args(parser):
+     """shared args for the online processors
+     parser: argparse.ArgumentParser object
+     """
+     group = parser.add_argument_group("WhisperStreaming processor arguments (shared for simulation from file and for the server)")
+-    group.add_argument('--min-chunk-size', type=float, default=1.2, 
+-                        help='Minimum audio chunk size in seconds. It waits up to this time to do processing. If the processing takes shorter '
+-                        'time, it waits, otherwise it processes the whole segment that was received by this time.')
++    group.add_argument(
++        "--min-chunk-size",
++        type=float,
++        default=1.2,
++        help="Minimum audio chunk size in seconds. It waits up to this time to do processing. If the processing takes shorter "
++        "time, it waits, otherwise it processes the whole segment that was received by this time.",
++    )
++
++    group.add_argument(
++        "--lan",
++        "--language",
++        type=str,
++        default="en",
++        help="Source language code, e.g. en, de, cs, or auto for automatic language detection from speech.",
++    )
++    group.add_argument("--task", type=str, default="transcribe", choices=["transcribe", "translate"], help="Transcribe or translate.")
+ 
+-    group.add_argument('--lan', '--language', type=str, default="en", 
+-                        help="Source language code, e.g. en, de, cs, or auto for automatic language detection from speech.")
+-    group.add_argument('--task', type=str, default='transcribe', 
+-                        choices=["transcribe","translate"],
+-                        help="Transcribe or translate.")
++    group.add_argument("--vac", action="store_true", default=False, help="Use VAC = voice activity controller. Recommended. Requires torch.")
++    group.add_argument("--vac-chunk-size", type=float, default=0.04, help="VAC sample size in seconds.")
+ 
+-    group.add_argument('--vac', action="store_true", default=False, 
+-                        help='Use VAC = voice activity controller. Recommended. Requires torch.')
+-    group.add_argument('--vac-chunk-size', type=float, default=0.04, 
+-                        help='VAC sample size in seconds.')
++    parser.add_argument(
++        "-l", "--log-level", dest="log_level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Set the log level", default="DEBUG"
++    )
+ 
+-    parser.add_argument("-l", "--log-level", dest="log_level", 
+-                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], 
+-                        help="Set the log level", default='DEBUG')
++    parser.add_argument("--logdir", help="Directory to save audio segments and generated texts for debugging.", default=None)
+ 
+-    parser.add_argument("--logdir", help="Directory to save audio segments and generated texts for debugging.",
+-                       default=None)
+ 
+ def asr_factory(args, factory=None):
+     """
+     Creates and configures an asr and online processor object through factory that is implemented in the backend.
+     """
+-#    if backend is None:
+-#        backend = args.backend
+-#    if backend == "simul-whisper":
+-#        from simul_whisper_backend import simul_asr_factory
++    #    if backend is None:
++    #        backend = args.backend
++    #    if backend == "simul-whisper":
++    #        from simul_whisper_backend import simul_asr_factory
+     asr, online = factory(args)
+ 
+     # Create the OnlineASRProcessor
+     if args.vac:
+         from whisper_streaming.vac_online_processor import VACOnlineASRProcessor
+-        online = VACOnlineASRProcessor(args.min_chunk_size, online)
++
++        online = VACOnlineASRProcessor(args.min_chunk_size, online, min_silence_duration_ms=args.min_silence_duration_ms)
+ 
+     if args.task == "translate":
+         if args.model_path.endswith(".en.pt"):
+@@ -76,11 +85,13 @@ def asr_factory(args, factory=None):
+ 
+     return asr, online
+ 
+-def set_logging(args,logger):
++
++def set_logging(args, logger):
+     logging.basicConfig(
+         # this format would include module name:
+         #    format='%(levelname)s\t%(name)s\t%(message)s')
+-            format='%(levelname)s\t%(message)s')
++        format="%(levelname)s\t%(message)s"
++    )
+     logger.setLevel(args.log_level)
+     logging.getLogger("simul_whisper").setLevel(args.log_level)
+     logging.getLogger("whisper_streaming").setLevel(args.log_level)
+@@ -88,20 +99,22 @@ def set_logging(args,logger):
+ 
+ def simulation_args(parser):
+     simulation_group = parser.add_argument_group("Arguments for simulation from file")
+-    simulation_group.add_argument('audio_path', type=str, help="Filename of 16kHz mono channel wav, on which live streaming is simulated.")
+-    simulation_group.add_argument('--start_at', type=float, default=0.0, help='Start processing audio at this time.')
++    simulation_group.add_argument("audio_path", type=str, help="Filename of 16kHz mono channel wav, on which live streaming is simulated.")
++    simulation_group.add_argument("--start_at", type=float, default=0.0, help="Start processing audio at this time.")
+     # TODO: offline mode is not implemented in SimulStreaming yet
+-#    simulation_group.add_argument('--offline', action="store_true", default=False, help='Offline mode.')
+-    simulation_group.add_argument('--comp_unaware', action="store_true", default=False, help='Computationally unaware simulation.')
++    #    simulation_group.add_argument('--offline', action="store_true", default=False, help='Offline mode.')
++    simulation_group.add_argument("--comp_unaware", action="store_true", default=False, help="Computationally unaware simulation.")
++
+ 
+ def main_simulation_from_file(factory, add_args=None):
+-    '''
+-    factory: function that creates the ASR and online processor object from args and logger.  
++    """
++    factory: function that creates the ASR and online processor object from args and logger.
+             or in the default WhisperStreaming local agreement backends (not implemented but could be).
+     add_args: add specific args for the backend
+-    '''
++    """
+ 
+     import argparse
++
+     parser = argparse.ArgumentParser()
+ 
+     processor_args(parser)
+@@ -117,12 +130,14 @@ def main_simulation_from_file(factory, add_args=None):
+         logger.error("No or one option from --offline and --comp_unaware are available, not both. Exiting.")
+         sys.exit(1)
+ 
+-    set_logging(args,logger)
++    set_logging(args, logger)
++
++    print(args)
+ 
+     audio_path = args.audio_path
+ 
+     SAMPLING_RATE = 16000
+-    duration = len(load_audio(audio_path))/SAMPLING_RATE
++    duration = len(load_audio(audio_path)) / SAMPLING_RATE
+     logger.info("Audio duration is: %2.2f seconds" % duration)
+ 
+     asr, online = asr_factory(args, factory)
+@@ -132,13 +147,13 @@ def main_simulation_from_file(factory, add_args=None):
+         min_chunk = args.min_chunk_size
+ 
+     # load the audio into the LRU cache before we start the timer
+-    a = load_audio_chunk(audio_path,0,1)
++    a = load_audio_chunk(audio_path, 0, 1)
+ 
+     # warm up the ASR because the very first transcribe takes much more time than the other
+     asr.warmup(a)
+ 
+     beg = args.start_at
+-    start = time.time()-beg
++    start = time.perf_counter() - beg
+ 
+     def output_transcript(iteration_output, now=None):
+         # output format in stdout is like:
+@@ -148,18 +163,19 @@ def main_simulation_from_file(factory, add_args=None):
+         #    - beg and end timestamp of the text segment, as estimated by Whisper model. The timestamps are not accurate, but they're useful anyway
+         # - the next words: segment transcript
+         if now is None:
+-            now = time.time() - start
++            now = time.perf_counter() - start
+ 
+         if iteration_output:
+-            start_ts = iteration_output['start']
+-            end_ts = iteration_output['end']
+-            text = iteration_output['text']
++            start_ts = iteration_output["start"]
++            end_ts = iteration_output["end"]
++            text = iteration_output["text"]
+             logger.debug(f"{now * 1000:.4f} {start_ts * 1000:.0f} {end_ts * 1000:.0f} {text}")
+             print(f"{now * 1000:.4f} {start_ts * 1000:.0f} {end_ts * 1000:.0f} {text}", flush=True)
+         else:
+             logger.debug("No text in this segment")
++            print(f"{now * 1000:.4f} {start_ts * 1000:.0f} {end_ts * 1000:.0f} [blank]", flush=True)
+ 
+-    if args.offline: ## offline mode processing (for testing/debugging)
++    if args.offline:  ## offline mode processing (for testing/debugging)
+         a = load_audio(audio_path)
+         online.insert_audio_chunk(a)
+         try:
+@@ -169,10 +185,10 @@ def main_simulation_from_file(factory, add_args=None):
+         else:
+             output_transcript(o)
+         now = None
+-    elif args.comp_unaware:  # computational unaware mode 
++    elif args.comp_unaware:  # computational unaware mode
+         end = beg + min_chunk
+         while True:
+-            a = load_audio_chunk(audio_path,beg,end)
++            a = load_audio_chunk(audio_path, beg, end)
+             online.insert_audio_chunk(a)
+             try:
+                 o = online.process_iter()
+@@ -186,23 +202,23 @@ def main_simulation_from_file(factory, add_args=None):
+ 
+             if end >= duration:
+                 break
+-            
++
+             beg = end
+-            
++
+             if end + min_chunk > duration:
+                 end = duration
+             else:
+                 end += min_chunk
+         now = duration
+ 
+-    else: # online = simultaneous mode
++    else:  # online = simultaneous mode
+         end = 0
+         while True:
+-            now = time.time() - start
+-            if now < end+min_chunk:
+-                time.sleep(min_chunk+end-now)
+-            end = time.time() - start
+-            a = load_audio_chunk(audio_path,beg,end)
++            now = time.perf_counter() - start
++            if now < end + min_chunk:
++                time.sleep(min_chunk + end - now)
++            end = time.perf_counter() - start
++            a = load_audio_chunk(audio_path, beg, end)
+             beg = end
+             online.insert_audio_chunk(a)
+ 
+@@ -213,12 +229,12 @@ def main_simulation_from_file(factory, add_args=None):
+                 pass
+             else:
+                 output_transcript(o)
+-            now = time.time() - start
+-            logger.info(f"## last processed {end:.2f} s, now is {now:.2f}, the latency is {now-end:.2f}")
++            now = time.perf_counter() - start
++            logger.info(f"## last processed {end:.2f} s, now is {now:.2f}, the latency is {now - end:.2f}")
+ 
+             if end >= duration:
+                 break
+         now = None
+ 
+     o = online.finish()
+-    output_transcript(o, now=now)
+\ No newline at end of file
++    output_transcript(o, now=now)

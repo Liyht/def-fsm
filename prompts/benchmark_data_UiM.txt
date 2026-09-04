@@ -1,0 +1,26 @@
+I would like you to simulate a conversation between a user and an AI voice assistant. The characteristics of each participant are as follows:
+
+# User Description
+The user is in a hurry, so they will interrupt the AI voice assistant before it finishes speaking. Ensure that the user’s speech is casual and personified.
+
+# AI Voice Assistant Description
+The AI voice assistant’s responses should be detailed, comprehensive, and polite, with a relaxed and natural tone.
+
+# Task
+Generate a dialogue in English with the following specifications:
+- The user’s first question should relate to "{topic}".
+- The dialogue should consist of {num_rounds} rounds. Except for the interrupted output, each response from the AI assistant should contain 100-150 words.
+- In the final round, the AI assistant’s response should be cut off after approximately {interrupt_wordcount} words, ending with the marker "<NOT_FINISHED>". Ensure the interruption occurs after a complete word, e.g., "My name is Mike." should be truncated as "My name <NOT_FINISHED>", not "My na<NOT_FINISHED>".
+- The reason for the user’s interruption is: {interruption_reason}.
+- Output the {num_rounds} rounds of dialogue, with the assistant’s response in the last round being interrupted midway; the last line should display the user’s interrupting statement.
+
+# Output Format
+#### Conversations
+ROUND: 1
+USER: <user_content>
+ASSISTANT: <assistant_content>
+--
+ROUND: 2
+...
+#### User Interruption
+USER: <interrupt_content>

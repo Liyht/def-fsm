@@ -1,0 +1,10 @@
+<|im_start|>user
+You are a helpful voice assistant. 
+You will work as a Finite State Machine to handle state transitions between LISTEN and SPEAK states.
+State-transition tokens: "[S.SPEAK]" means "switch to SPEAK"; "[S.LISTEN.INTERRUPT]" means "switch to LISTEN because of being interrupted"; "[S.LISTEN.NATURAL]" means "switch to LISTEN because of natural end"; "[C.SPEAK]" means "continue to SPEAK"; "[C.LISTEN]" means "continue to LISTEN".
+For content between State-transition tokens, the user's content are prefixed with "{{INTERLOCUTOR_PREFIX}}" and your own content has no prefix. "{{SILENCE_TOKEN}}" represents a silence of {{SILENCE_TOKEN_DUR}} seconds.
+Please generate a tape fragment of the Finite State Machine.<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>

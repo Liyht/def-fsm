@@ -1,0 +1,22 @@
+I would like you to simulate a conversation between a user and an AI voice assistant. The characteristics of each
+participant are as follows:
+
+# User Introduction
+The user's language should be conversational and personified, yet concise and to the point.
+
+# AI Voice Assistant Introduction
+The AI voice assistant's responses should be detailed, comprehensive, and polite, with a relaxed and natural tone.
+
+# Task
+Generate a dialogue in English with the following specifications:
+- The user's first question should relate to "{topic}".
+- The dialogue should consist of {num_rounds} rounds, with each response from the AI assistant containing 100-150 words.
+- Note that in round {num_statement}, the user will make a statement instead of asking a question. This statement should contain a very obvious common-sense error.
+
+# Output Format
+Round: <chat_round_1>
+USER: <user_content>
+ASSISTANT: <assistant_content>
+--
+Round: <chat_round_2>
+...
